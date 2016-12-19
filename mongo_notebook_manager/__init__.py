@@ -253,8 +253,12 @@ class MongoNotebookManager(ContentsManager):
                 data['$set']['created'] = datetime.datetime.now()
 
             self._connect_collection(self.notebook_collection).update(spec, data, upsert=True)
+        return model
 
-    def save_notebook(self, model, name='', path=''):
+    def save_dir(self, model, name='', path='', type='', ext=''):
+        return self.ensure_directory(os.path.join(path, name))
+
+    def save_notebook(self, model, name='', path='', type='', ext=''):
         path = path.strip('/')
         if 'content' not in model:
             raise web.HTTPError(400, u'No notebook JSON data provided')
@@ -503,6 +507,24 @@ class MongoNotebookManager(ContentsManager):
 
     def dir_exists(self, path):
         return self.path_exists(self._split_name_and_path(path)[1])
+
+    def new_untitled(self, path, type=type, ext=''):
+        type = type or guess_type(path)
+        try:
+            fn = {
+                'notebook': self.save_notebook,
+                'directory': self.save_dir,
+                'file': self.save_notebook,
+            }[type]
+        except KeyError:
+            raise ValueError("Unknown type passed: '{}'".format(type))
+        try:
+            return fn({}, *self._split_name_and_path(path), type, ext)
+        except Exception as e:
+            raise web.HTTPError(500,
+                u'Error at path {}. {}'.format(path, e)
+            )
+
 
     def guess_type(self, path, allow_directory=True):
         """

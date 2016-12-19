@@ -5,13 +5,17 @@ as it is currently not available as a module
 import time
 import pymongo
 
+
 def get_methods(obj):
     attrs = (attr for attr in dir(obj))
     attrs = (attr for attr in attrs if not attr.startswith('_'))
     return set([attr for attr in attrs if hasattr(getattr(obj, attr), '__call__')])
 
 EXECUTABLE_MONGO_METHODS = get_methods(pymongo.collection.Collection)
-EXECUTABLE_MONGO_METHODS.update(get_methods(pymongo.Connection))
+try:
+    EXECUTABLE_MONGO_METHODS.update(get_methods(pymongo.Connection))
+except AttributeError:  # pymongo 3
+    EXECUTABLE_MONGO_METHODS.update(get_methods(pymongo.MongoClient))
 EXECUTABLE_MONGO_METHODS.update(get_methods(pymongo))
 
 
@@ -53,6 +57,7 @@ class Executable:
     def __repr__(self):
         return self.method.__repr__()
 
+
 class MongoProxy:
     """ Proxy for MongoDB connection.
     Methods that are executable, i.e find, insert etc, get wrapped in an
@@ -61,14 +66,14 @@ class MongoProxy:
     """
     def __init__(self, conn):
         """ conn is an ordinary MongoDB-connection.
-        
+
         """
         self.conn = conn
-       
+
     def __getitem__(self, key):
         """ Create and return proxy around the method in the connection
         named "key".
-        
+
         """
         item = self.conn[key]
         if hasattr(item, '__call__'):
@@ -81,7 +86,7 @@ class MongoProxy:
         handles AutoReconnect-Exception.
 
         """
-        
+
         attr = getattr(self.conn, key)
         if hasattr(attr, '__call__') and key in EXECUTABLE_MONGO_METHODS:
             return Executable(attr)

@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import os
 from setuptools import setup
 
 
@@ -29,9 +28,12 @@ setup(
         'Operating System :: OS Independent'
     ],
     install_requires=[
-        'pymongo',
-        'ipython<3'
+        'pymongo<3.5'
     ],
+    extras_require={
+        'ipy3': ['ipython[test,notebook]<4.0'],
+        'ipy4': ['notebook[test]>=4.0'],
+    },
     entry_points={
         'console_scripts': [
             'notebooks_importer = mongo_notebook_manager.notebooks_importer:main'

@@ -19,7 +19,7 @@ from .utils.ipycompat import Unicode, CBool, ContentsManager, reads, new_noteboo
 
 def sort_key(item):
     """Case-insensitive sorting."""
-    return item['name'].lower()
+    return item['path'].lower()
 
 #-----------------------------------------------------------------------------
 # Classes
@@ -64,17 +64,29 @@ class MongoNotebookManager(ContentsManager):
         self.ensure_root_directory()
 
     def ensure_root_directory(self):
-        self.ensure_directory('')
+        model = {}
+        model['name'] = ''
+        model['path'] = ''
+        model['last_modified'] = datetime.datetime.utcnow()
+        model['user_id'] = self.user_id
+        model['created'] = datetime.datetime.utcnow()
+        model['writable'] = True
+        model['mimetype'] = 'directory'
+        model['format'] = None
+        model['type'] = 'directory'
+        model['content'] = None
+
+        self.ensure_directory(model)
 
     def get_notebook_names(self, path=''):
         """List all notebook names in the notebook dir and path."""
-        path = path.strip('/')
+        path = path
         spec = {'path': path,
                 'type': 'notebook'}
-        fields = {'name': 1}
+        fields = {'path': 1}
         notebooks = list(self._connect_collection(self.notebook_collection).find(spec, fields))
-        names = [n['name'] for n in notebooks]
-        return names
+        paths = [n['path'] for n in notebooks]
+        return paths
 
     def path_exists(self, path):
         """Does the API-style path (directory) actually exist?
@@ -91,7 +103,6 @@ class MongoNotebookManager(ContentsManager):
             Whether the path is indeed a directory.
         """
 
-        path = path.strip('/')
         spec = {'path': path}
         count = self._connect_collection(self.notebook_collection).find(spec).count()
         return count > 0
@@ -100,11 +111,9 @@ class MongoNotebookManager(ContentsManager):
         #Nothing is hidden
         return False
 
-    def notebook_exists(self, name, path=''):
-        path = path.strip('/')
+    def notebook_exists(self, path=''):
         spec = {
             'path': path,
-            'name': name,
             'type': 'notebook'
         }
 
@@ -112,28 +121,21 @@ class MongoNotebookManager(ContentsManager):
         return count == 1
 
     def list_dirs(self, path):
-        path = path.strip('/')
-        if path == '':
-            prefix = ''
-        else:
-            prefix = path + '/'
-
         spec = {
-            'path': prefix,
+            'path': path,
             'type': 'directory'
         }
-        fields = {'name': 1}
-        notebooks = list(self._connect_collection(self.notebook_collection).find(spec,fields))
-        names = [n['name'].lstrip(prefix) for n in notebooks if '/' not in n['name']]
+        fields = {'path': 1}
+        paths = list(self._connect_collection(self.notebook_collection).find(spec, fields))
 
-        dirs = [self.get_dir_model(name, path) for name in names]
+        dirs = [self.get_dir_model(p['path']) for p in paths]
         dirs = sorted(dirs, key=sort_key)
         return dirs
 
-    def get_dir_model(self, name, path=''):
-        path = path.strip('/')
+    def get_dir_model(self, path):
         spec = {
-            'path': os.path.join(path, name),
+            'path': path,
+            'name': path,
             'type': 'directory'
         }
         fields = {
@@ -143,14 +145,14 @@ class MongoNotebookManager(ContentsManager):
         }
 
         notebook = self._connect_collection(self.notebook_collection).find_one(spec, fields)
-        if notebook == None:
-            raise IOError('directory does not exist: %r' % (path + '|' + name))
+        if notebook is None:
+            raise IOError('directory does not exist: %r' % path)
 
         last_modified = notebook['lastModified']
         created = notebook['created']
         # Create the notebook model.
         model = {}
-        model['name'] = name
+        model['name'] = path
         model['path'] = path
         model['last_modified'] = last_modified
         model['user_id'] = notebook['user_id']
@@ -161,28 +163,25 @@ class MongoNotebookManager(ContentsManager):
         model['type'] = 'directory'
         return model
 
-    def get_dir(self, name, path='', content=True):
+    def get_dir(self, path='', content=True):
         model = self.get_dir_model(path)
         if content:
             model['content'] = self.list_notebooks(path) + self.list_dirs(path)
         return model
 
     def list_notebooks(self, path):
-        path = path.strip('/')
         notebook_names = self.get_notebook_names(path)
-        notebooks = [self.get_notebook(name, path, content=True)
-                     for name in notebook_names if self.should_list(name)]
+        notebooks = [self.get_notebook(path, content=True)
+                     for path in notebook_names if self.should_list(path)]
         notebooks = sorted(notebooks, key=sort_key)
         return notebooks
 
-    def get_notebook(self, name, path='', content=True):
-        path = path.strip('/')
-        if not self.notebook_exists(name=name, path=path):
-            raise web.HTTPError(404, u'Notebook does not exist: %s' % name)
+    def get_notebook(self, path='', content=True):
+        if not self.notebook_exists(path=path):
+            raise web.HTTPError(404, u'Notebook does not exist: %s' % path)
 
         spec = {
             'path': path,
-            'name': name,
             'type': 'notebook'
         }
         fields = {
@@ -199,7 +198,7 @@ class MongoNotebookManager(ContentsManager):
         created = notebook['created']
         # Create the notebook model.
         model = {}
-        model['name'] = name
+        model['name'] = path
         model['path'] = path
         model['last_modified'] = last_modified
         model['created'] = created
@@ -211,13 +210,12 @@ class MongoNotebookManager(ContentsManager):
         if content:
             with StringIO(notebook['content']) as f:
                 nb = reads(f, u'json')
-            self.mark_trusted_cells(nb, name, path)
+            self.mark_trusted_cells(nb, path)
             model['content'] = nb
         return model
 
     def create_notebook(self, model=None, path=''):
         """Create a new notebook and return its model with no content."""
-        path = path.strip('/')
         if model is None:
             model = {}
         if 'content' not in model:
@@ -225,67 +223,71 @@ class MongoNotebookManager(ContentsManager):
 
         model['path'] = path
         model['type'] = 'notebook'
-        model = self.save_notebook(model, model['name'], model['path'])
+        model = self.save_notebook(model, model['path'])
 
         return model
 
-    def ensure_directory(self, path=''):
+    def ensure_directory(self, model, path=''):
         """Create a new directory."""
-        path = path.strip('/')
-        model = {}
-        model['path'] = path
-        model['type'] = 'directory'
+        dir_model = dict()
+        dir_model['name'] = model.get('name', path)
+        dir_model['path'] = model.get('path', path)
+        dir_model['type'] = model.get('type', 'directory')
+        dir_model['last_modified'] = model.get('last_modified', datetime.datetime.utcnow())
+        dir_model['created'] = model.get('created', datetime.datetime.utcnow())
+        dir_model['content'] = model.get('content', None)
+        dir_model['writable'] = model.get('writable', False)
+        dir_model['format'] = model.get('format', None)
+        dir_model['mimetype'] = model.get('mimetype', 'directory')
+
         if not self.path_exists(path):
             spec = {
-                'path': path,
-                'name': path,
+                'name': dir_model['name'],
+                'path': dir_model['path'],
             }
             data = {
                 '$set': {
-                    'type': 'directory',
-                    'lastModified': datetime.datetime.now(),
-                    'user_id': self.user_id
+                    'type': dir_model['type'],
+                    'lastModified': dir_model['last_modified'],
+                    'user_id': self.user_id,
+                    'created': dir_model['created'],
+                    'content': dir_model['content'],
+                    'writable': dir_model['writable'],
+                    'format': dir_model['format'],
+                    'mimetype': dir_model['mimetype']
                 }
             }
-            if 'created' in model:
-                data['$set']['created'] = model['created']
-            else:
-                data['$set']['created'] = datetime.datetime.now()
-
             self._connect_collection(self.notebook_collection).update(spec, data, upsert=True)
-        return model
+        return dir_model
 
-    def save_dir(self, model, name='', path='', type='', ext=''):
-        return self.ensure_directory(os.path.join(path, name))
+    def save_dir(self, model, path='', type='', ext=''):
+        return self.ensure_directory(model, path)
 
-    def save_notebook(self, model, name='', path='', type='', ext=''):
-        path = path.strip('/')
+    def save_notebook(self, model, path='', type='', ext=''):
         if 'content' not in model:
             raise web.HTTPError(400, u'No notebook JSON data provided')
 
         # One checkpoint should always exist
-        if self.notebook_exists(name, path) and not self.list_checkpoints(name, path):
-            self.create_checkpoint(name, path)
+        if self.notebook_exists(path) and not self.list_checkpoints(path):
+            self.create_checkpoint(path)
 
-        new_path = model.get('path', path).strip('/')
-        new_name = model.get('name', name)
+        new_path = model.get('path', path)
+        new_name = model.get('name', path)
 
-        if path != new_path or name != new_name:
-            self.rename_notebook(name, path, new_name, new_path)
+        if path != new_path:
+            self.rename_notebook(path, new_path)
 
         # Save the notebook file
         nb = to_notebook_json(model['content'])
 
-        self.check_and_sign(nb, new_name, new_path)
+        self.check_and_sign(nb, new_path)
 
-        if 'name' in nb['metadata']:
-            nb['metadata']['name'] = u''
         try:
             with StringIO() as f:
                 writes(nb, f, u'json')
                 spec = {
-                    'path': path,
-                    'name': name
+                    'path': new_path,
+                    'name': new_name,
                 }
                 data = {
                     '$set': {
@@ -300,68 +302,61 @@ class MongoNotebookManager(ContentsManager):
                     data['$set']['created'] = model['created']
                 else:
                     data['$set']['created'] = datetime.datetime.now()
-                notebook = self._connect_collection(self.notebook_collection).update(spec, data, upsert=True)
+                self._connect_collection(self.notebook_collection).update(spec, data, upsert=True)
         except Exception as e:
             raise web.HTTPError(400, u'Unexpected error while autosaving notebook: %s' % (e))
-        model = self.get_notebook(new_name, new_path, content=False)
+        model = self.get_notebook(new_path, content=False)
 
         return model
 
-    def update_notebook(self, model, name, path=''):
-        path = path.strip('/')
-        new_name = model.get('name', name)
-        new_path = model.get('path', path).strip('/')
-        if path != new_path or name != new_name:
-            self.rename_notebook(name, path, new_name, new_path)
-        model = self.get_notebook(new_name, new_path, content=False)
+    def update_notebook(self, model, path=''):
+        new_path = model.get('path', path)
+        if path != new_path:
+            self.rename_notebook(path, new_path)
+        model = self.get_notebook(new_path, content=False)
         return model
 
-    def delete_notebook(self, name, path=''):
-        path = path.strip('/')
+    def delete_notebook(self, path=''):
         spec = {
             'path': path,
-            'name': name
         }
         fields = {
-            'name': 1,
+            'path': 1,
         }
 
-        notebook = self._connect_collection(self.notebook_collection).find_one(spec,fields)
+        notebook = self._connect_collection(self.notebook_collection).find_one(spec, fields)
         if not notebook:
-            raise web.HTTPError(404, u'Notebook does not exist: %s' % name)
+            raise web.HTTPError(404, u'Notebook does not exist: %s' % path)
 
         # clear checkpoints
         self._connect_collection(self.checkpoint_collection).remove(spec)
         self._connect_collection(self.notebook_collection).remove(spec)
 
-    def rename_notebook(self, old_name, old_path, new_name, new_path):
-        old_path = old_path.strip('/')
-        new_path = new_path.strip('/')
-        if new_name == old_name and new_path == old_path:
+    def rename_notebook(self, old_path, new_path):
+        old_path = old_path
+        new_path = new_path
+        if new_path == old_path:
             return
 
         # Should we proceed with the move?
         spec = {
             'path': new_path,
-            'name': new_name
         }
         fields = {
-            'name': 1,
+            'path': 1,
         }
-        notebook = self._connect_collection(self.notebook_collection).find_one(spec,fields)
+        notebook = self._connect_collection(self.notebook_collection).find_one(spec, fields)
         if notebook != None:
-            raise web.HTTPError(409, u'Notebook with name already exists: %s' % new_name)
+            raise web.HTTPError(409, u'Notebook with name already exists: %s' % new_path)
 
         # Move the notebook file
         try:
             spec = {
-                'path': old_path,
-                'name': old_name
+                'path': old_path
             }
             modify = {
                 '$set': {
-                    'path': new_path,
-                    'name': new_name
+                    'path': new_path
                 }
             }
             self._connect_collection(self.notebook_collection).update(spec, modify)
@@ -370,23 +365,20 @@ class MongoNotebookManager(ContentsManager):
 
         # Move the checkpoints
         spec = {
-            'path': old_path,
-            'name': old_name
+            'path': old_path
         }
         modify = {
             '$set': {
-                'path': new_path,
-                'name': new_name
+                'path': new_path
             }
         }
         self._connect_collection(self.checkpoint_collection).update(spec, modify, multi=True)
 
     # public checkpoint API
-    def create_checkpoint(self, name, path=''):
-        path = path.strip('/')
+    def create_checkpoint(self, path=''):
+        path = path
         spec = {
-            'path': path,
-            'name': name
+            'path': path
         }
 
         notebook = self._connect_collection(self.notebook_collection).find_one(spec)
@@ -408,20 +400,18 @@ class MongoNotebookManager(ContentsManager):
         # return the checkpoint info
         return dict(id=cp_id, last_modified=last_modified)
 
-    def list_checkpoints(self, name, path=''):
-        path = path.strip('/')
+    def list_checkpoints(self, path=''):
+        path = path
         spec = {
-            'path': path,
-            'name': name,
+            'path': path
         }
         checkpoints = list(self._connect_collection(self.checkpoint_collection).find(spec))
         return [dict(id=c['cp'], last_modified=c['lastModified']) for c in checkpoints]
 
-    def restore_checkpoint(self, checkpoint_id, name, path=''):
-        path = path.strip('/')
+    def restore_checkpoint(self, checkpoint_id, path=''):
+        path = path
         spec = {
             'path': path,
-            'name': name,
             'cp': checkpoint_id
         }
 
@@ -429,7 +419,7 @@ class MongoNotebookManager(ContentsManager):
 
         if checkpoint == None:
             raise web.HTTPError(
-                404, u'Notebook checkpoint does not exist: %s-%s' % (name, checkpoint_id)
+                404, u'Notebook checkpoint does not exist: %s-%s' % (path, checkpoint_id)
             )
         del spec['cp']
         del checkpoint['cp']
@@ -437,24 +427,23 @@ class MongoNotebookManager(ContentsManager):
         checkpoint = {'$set': checkpoint}
         self._connect_collection(self.notebook_collection).update(spec, checkpoint, upsert=True)
 
-    def delete_checkpoint(self, checkpoint_id, name, path=''):
-        path = path.strip('/')
+    def delete_checkpoint(self, checkpoint_id, path=''):
+        path = path
         spec = {
             'path': path,
-            'name': name,
             'cp': checkpoint_id
         }
         checkpoint = self._connect_collection(self.checkpoint_collection).find_one(spec)
         if checkpoint == None:
             raise web.HTTPError(404,
-                u'Notebook checkpoint does not exist: %s%s-%s' % (path, name, checkpoint_id)
+                u'Notebook checkpoint does not exist: %s-%s' % (path, checkpoint_id)
             )
         self._connect_collection(self.checkpoint_collection).remove(spec)
 
     def info_string(self):
         return "Serving notebooks from mongodb"
 
-    def get_kernel_path(self, name, path='', model=None):
+    def get_kernel_path(self, path='', model=None):
         return os.path.join(self.notebook_dir, path)
 
     #mongodb related functions
@@ -472,59 +461,51 @@ class MongoNotebookManager(ContentsManager):
                 self._conn = self._connectReplicaSet()
         return self._conn[self.database_name][collection]
 
-    def _split_name_and_path(self, path):
-        list_path = path.strip("/").split("/")
-        return list_path[-1], "/".join(list_path[:-1])
-
     def get(self, path, content=True, type=None, format=None, **kwargs):
-        type = type or guess_type(path)
+        model_type = type or self.guess_type(path)
         try:
             fn = {
                 'notebook': self.get_notebook,
                 'directory': self.get_dir,
                 'file': self.get_notebook,
-            }[type]
+            }[model_type]
         except KeyError:
-            raise ValueError("Unknown type passed: '{}'".format(type))
+            raise ValueError("Unknown type passed: '{}'".format(model_type))
         try:
-            return fn(*self._split_name_and_path(path), content=content)
+            return fn(path, content=content)
         except Exception as e:
             raise web.HTTPError(500,
                 u'Error at path {}. {}'.format(path, e)
             )
 
     def save(self, model, path):
-        return self.save_notebook(model=model, *self._split_name_and_path(path))
-
-    def delete_file(self, path):
-        return self.delete_notebook(*self._split_name_and_path(path))
-
-    def rename_file(self, old_path, new_path):
-        return self.rename_notebook(*self._split_name_and_path(old_path), *self._split_name_and_path(new_path))
-
-    def file_exists(self, path):
-        return self.notebook_exists(*self._split_name_and_path(path))
-
-    def dir_exists(self, path):
-        return self.path_exists(self._split_name_and_path(path)[1])
-
-    def new_untitled(self, path, type=type, ext=''):
-        type = type or guess_type(path)
+        model_type = model.get('type') or self.guess_type(path)
         try:
             fn = {
                 'notebook': self.save_notebook,
                 'directory': self.save_dir,
                 'file': self.save_notebook,
-            }[type]
+            }[model['type']]
         except KeyError:
-            raise ValueError("Unknown type passed: '{}'".format(type))
+            raise ValueError("Unknown type passed: '{}'".format(model.get('type')))
         try:
-            return fn({}, *self._split_name_and_path(path), type, ext)
+            return fn(model, path, model_type)
         except Exception as e:
             raise web.HTTPError(500,
                 u'Error at path {}. {}'.format(path, e)
             )
 
+    def delete_file(self, path):
+        return self.delete_notebook(path)
+
+    def rename_file(self, old_path, new_path):
+        return self.rename_notebook(old_path, new_path)
+
+    def file_exists(self, path):
+        return self.notebook_exists(path)
+
+    def dir_exists(self, path):
+        return self.path_exists(path)
 
     def guess_type(self, path, allow_directory=True):
         """
